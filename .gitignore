@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
+.idea/
+.vscode/
+# Local-only IDE metadata (do not commit)
+.cursor/
+.cursorrules
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets / local
+.env
+*.local
+
+# Large local blueprints (add samples under data/blueprints/ intentionally or use synthetic)
+# Uncomment if you keep proprietary PDFs only locally:
+# *.pdf
+# *.dxf

@@ -1,0 +1,9 @@
+material_id,material_type,size_desc,size_value,volume_cuft,unit,unit_cost_usd
+LUM_2x4_8,lumber,2x4x8,8,0.35,lf,1.25
+LUM_2x6_10,lumber,2x6x10,10,0.55,lf,2.10
+LUM_2x4_10,lumber,2x4x10,10,0.44,lf,1.55
+DRY_HALF,drywall,1/2 inch,32,0,sheet,12.00
+DRY_FIVE,drywall,5/8 inch,40,0,sheet,14.50
+CONC_3000,concrete,3000 PSI,1,1,cy,185.00
+STL_W8,steel,W8x18,18,0,lf,38.00
+INS_R19,insulation,R19 batt,88,0,sqft,0.72
