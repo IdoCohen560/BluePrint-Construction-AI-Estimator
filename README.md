@@ -19,12 +19,83 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
+## Web app (browser — multi-file uploads, per-file scale)
+
+The server **only reads files you upload** (bytes in the request). It does **not** browse folders on disk.
+
+### Streamlit (multi-select + ZIP)
+
+From the repository root:
+
+```bash
+pip install streamlit
+python -m streamlit run app.py
+```
+
+Open this URL in your browser (use **127.0.0.1**, not `localhost`, if you see connection errors):
+
+**http://127.0.0.1:8501**
+
+The repo includes [`.streamlit/config.toml`](.streamlit/config.toml) so the server binds to `127.0.0.1` on port `8501`.
+
+- **Multi-select:** choose many drawings at once (PDF, PNG, JPG, JSON, DXF).
+- **ZIP:** upload one or more `.zip` files; supported extensions inside are expanded and processed (same-name duplicates are skipped).
+- **Scale:** inferred **per file** from PDF text (regex), OCR on title-block crops for scans, or documented defaults (see confidence in the results table). There is **no manual scale** sidebar.
+- **Sidebar:** ceiling height, material category, optional materials CSV (`material_id`, `material_type`, `size_value`, `unit_cost_usd`).
+
+**Folder upload (whole directory tree):** `st.file_uploader` does not expose HTML5 `webkitdirectory`. Use the **Flask** app below and use **Pick a folder** (Chromium / Edge / Safari send each file with a relative path like `MyProject/sheets/A1.pdf`). Alternatively, zip the folder and upload the ZIP in Streamlit.
+
+### Flask (folder + multi + ZIP)
+
+```bash
+pip install flask
+python web_flask.py
+```
+
+Open **http://127.0.0.1:8765**. Use **Pick a folder**, **multiple files**, and/or **ZIP**; processing matches Streamlit’s batch API (`web_core.run_project`).
+
+### Tesseract OCR (optional, for scale on scanned drawings)
+
+`pytesseract` is listed in `requirements.txt`. On **Windows**, install [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) and ensure `tesseract.exe` is on your **PATH** (or set `TESSDATA_PREFIX` if needed). If Tesseract is missing, the app **skips** the OCR branch and falls back to PDF text or defaults, with lower confidence shown in the UI.
+
+**If the page does not load (browser error -102 / connection refused):**
+
+1. Leave the terminal **open** — closing it stops the server. You must see Streamlit’s “You can now view your Streamlit app” message before opening the URL.
+2. Double-click **`START_STREAMLIT.cmd`** in the project folder (keeps a window open and starts Streamlit).
+3. Try **http://127.0.0.1:8501** and **http://localhost:8501** after the server says it is running.
+4. **Flask fallback (often works when Streamlit cannot connect):**
+   ```bash
+   pip install flask
+   python web_flask.py
+   ```
+   Or double-click **`START_FLASK.cmd`**, then open **http://127.0.0.1:8765**.
+5. If port 8501 is busy: `python -m streamlit run app.py --server.port 8502` → open **http://127.0.0.1:8502**.
+6. Pause VPN / corporate tools briefly; some block loopback.
+7. Allow **Python** through Windows Firewall if prompted.
+
+## Run without Jupyter (quick check)
+
+From the repository root:
+
+```bash
+python run_demo.py
+```
+
+This prints ingest, wall detection, scale, tree-model metrics, and a toy cost rollup in the terminal (no browser).
+
 ## Run notebooks
 
 From the repository root (after activating the virtual environment):
 
 ```bash
+pip install notebook
 jupyter notebook notebooks
+```
+
+Copy the **`http://127.0.0.1:8888/tree?token=...`** URL from the terminal into your browser (the full URL including `token=` is required). If the page does not load, check that nothing else is using port 8888, or try:
+
+```bash
+jupyter notebook notebooks --port=8889
 ```
 
 Run in order:
@@ -39,8 +110,8 @@ Run in order:
 
 ## Assumptions
 
-- Default **ceiling height** for rough wall area (e.g. drywall) is **8 ft** unless overridden in data or code.  
-- **Scale** is supplied as `feet_per_pixel` or as `dpi` + `drawing_feet_per_drawing_inch` (e.g. `4.0` for common `1/4" = 1'-0"`).  
+- Default **ceiling height** for rough wall area (e.g. drywall) is **8 ft** unless overridden in the web sidebar or data.  
+- **Scale** in the web apps is **inferred per file** (PDF text / OCR / vector units / defaults). Notebooks and `run_demo.py` may still set `ScaleConfig` explicitly for teaching.  
 - Material **unit costs** come from the CSV; the models predict **match**, not price.
 
 ## Data

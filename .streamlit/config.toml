@@ -1,0 +1,13 @@
+# Fixes browsers that fail on "localhost" or when the server only binds to one address.
+# See: https://docs.streamlit.io/library/advanced-features/configuration
+
+[server]
+# Listen on all interfaces so 127.0.0.1 and localhost both reach the app on Windows.
+address = "0.0.0.0"
+port = 8501
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

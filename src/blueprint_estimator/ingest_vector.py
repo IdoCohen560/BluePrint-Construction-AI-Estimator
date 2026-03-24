@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 from blueprint_estimator.schemas import IngestResult, Segment
 
 
-def segments_from_json(path: str | Path) -> list[Segment]:
-    """
-    Load segments from a simple JSON file:
-    {"segments": [{"x1":0,"y1":0,"x2":10,"y2":0}, ...]}
-    Coordinates are drawing units (same as CAD export scale).
-    """
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+def segments_from_json_dict(data: dict) -> list[Segment]:
+    """Parse segment list from decoded JSON dict."""
     out: list[Segment] = []
     for row in data.get("segments", []):
         out.append(
@@ -25,6 +21,27 @@ def segments_from_json(path: str | Path) -> list[Segment]:
             )
         )
     return out
+
+
+def segments_from_json(path: str | Path) -> list[Segment]:
+    """
+    Load segments from a simple JSON file:
+    {"segments": [{"x1":0,"y1":0,"x2":10,"y2":0}, ...]}
+    Coordinates are drawing units (same as CAD export scale).
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return segments_from_json_dict(data)
+
+
+def vector_json_ingest_bytes(data: bytes, filename: str) -> IngestResult:
+    payload = json.loads(data.decode("utf-8"))
+    segs = segments_from_json_dict(payload)
+    return IngestResult(
+        source="vector_json",
+        image_bgr=None,
+        segments_draw=segs,
+        meta={"filename": filename},
+    )
 
 
 def vector_json_ingest(path: str | Path) -> IngestResult:
@@ -84,3 +101,22 @@ def vector_dxf_ingest(path: str | Path, layer_filter: set[str] | None = None) ->
         segments_draw=segs,
         meta={"path": str(Path(path).resolve())},
     )
+
+
+def vector_dxf_ingest_bytes(
+    data: bytes, filename: str, layer_filter: set[str] | None = None
+) -> IngestResult:
+    suffix = Path(filename).suffix if Path(filename).suffix else ".dxf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        segs = dxf_lines_to_segments(tmp_path, layer_filter=layer_filter)
+        return IngestResult(
+            source="vector_dxf",
+            image_bgr=None,
+            segments_draw=segs,
+            meta={"filename": filename},
+        )
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
