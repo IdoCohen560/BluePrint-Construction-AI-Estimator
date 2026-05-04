@@ -31,7 +31,9 @@ from blueprint_estimator.exhibit_mask import (  # noqa: E402
     render_exhibit_pages,
 )
 from blueprint_estimator.wall_detector import (  # noqa: E402
+    building_footprint_mask,
     detect_walls,
+    _footprint_distance_features,
     mask_text_regions,
     segment_features,
     _length,
@@ -41,9 +43,13 @@ from blueprint_estimator.wall_detector import (  # noqa: E402
 )
 
 
-POS_OVERLAP = 0.35  # segment is positive if >=35% of its line lies in red mask
-NEG_OVERLAP_MAX = 0.05  # below this is a confident negative; in-between dropped
-RASTER_THICKNESS = 8
+POS_OVERLAP = 0.30
+NEG_OVERLAP_MAX = 0.03
+RASTER_THICKNESS = 6
+RENDER_DPI = 220
+MIN_HIGHLIGHT_COMPONENT_AREA = 600   # ignore tiny color blobs (legend dots, stamps)
+INSIDE_REGION_FRACTION = 0.6         # segment is positive if 60%+ of its midpoint
+                                     # neighborhood lies inside one component bbox
 
 
 def rasterize_segment(segment, shape) -> np.ndarray:
@@ -62,7 +68,21 @@ def overlap_fraction(seg_mask: np.ndarray, gt_mask: np.ndarray) -> float:
     return float(inter / total) if total else 0.0
 
 
-def page_features_and_labels(image_bgr: np.ndarray, red_mask: np.ndarray):
+def _build_region_mask(highlight_mask: np.ndarray) -> np.ndarray:
+    """Drop tiny color noise (legend swatches, stamp ink) and return the
+    cleaned per-pixel highlight mask used as positive ground truth.
+    """
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(highlight_mask, connectivity=8)
+    out = np.zeros_like(highlight_mask)
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] >= MIN_HIGHLIGHT_COMPONENT_AREA:
+            out[lab == i] = 255
+    # generous dilation so we capture line work that BORDERS the highlight region
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    return cv2.dilate(out, k, iterations=3)
+
+
+def page_features_and_labels(image_bgr: np.ndarray, highlight_mask: np.ndarray):
     """Return (X, y, segments) for one exhibit page."""
     th = physical_thresholds(None)
     text_keep = mask_text_regions(image_bgr)
@@ -79,7 +99,8 @@ def page_features_and_labels(image_bgr: np.ndarray, red_mask: np.ndarray):
         thickness_min=th["wall_thickness_min_px"],
         thickness_max=th["wall_thickness_max_px"],
     )
-    feats = np.stack([
+    H, W = image_bgr.shape[:2]
+    base = np.stack([
         segment_features(
             s, gray, raw, text_keep, partner_scores[i],
             junction_radius=th["junction_radius_px"],
@@ -87,18 +108,38 @@ def page_features_and_labels(image_bgr: np.ndarray, red_mask: np.ndarray):
         )
         for i, s in enumerate(raw)
     ])
+    # add normalized positional features: midpoint x/y as fraction of image,
+    # and signed distance from page edge (helps model learn "near building
+    # boundary" without leaking labels)
+    pos = np.array([
+        [
+            ((s.x1 + s.x2) / 2) / W,
+            ((s.y1 + s.y2) / 2) / H,
+            min(((s.x1 + s.x2) / 2) / W, 1 - ((s.x1 + s.x2) / 2) / W),
+            min(((s.y1 + s.y2) / 2) / H, 1 - ((s.y1 + s.y2) / 2) / H),
+        ]
+        for s in raw
+    ])
+    footprint = building_footprint_mask(gray)
+    fp_feats = _footprint_distance_features(footprint, raw)
+    feats = np.hstack([base, pos, fp_feats])
 
-    # dilate red mask so anti-aliased edges count
-    k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    gt = cv2.dilate(red_mask, k, iterations=2)
+    gt = _build_region_mask(highlight_mask)
+    h, w = gt.shape
 
     labels = np.full(len(raw), -1, dtype=np.int64)
     for i, s in enumerate(raw):
+        # sample N points along the segment and check fraction inside gt
+        n_samples = 9
+        xs = np.linspace(s.x1, s.x2, n_samples).astype(int).clip(0, w - 1)
+        ys = np.linspace(s.y1, s.y2, n_samples).astype(int).clip(0, h - 1)
+        inside_frac = float((gt[ys, xs] > 0).mean())
+        # also rasterize-overlap as a stronger positive signal
         sm = rasterize_segment(s, image_bgr.shape)
         ov = overlap_fraction(sm, gt)
-        if ov >= POS_OVERLAP:
+        if inside_frac >= INSIDE_REGION_FRACTION or ov >= POS_OVERLAP:
             labels[i] = 1
-        elif ov <= NEG_OVERLAP_MAX:
+        elif inside_frac <= 0.05 and ov <= NEG_OVERLAP_MAX:
             labels[i] = 0
     keep = labels >= 0
     return feats[keep], labels[keep], [raw[i] for i in range(len(raw)) if keep[i]]
@@ -119,7 +160,7 @@ def main() -> int:
         project = pdf.stem.replace(" Exhibit A", "").replace(" - High Res", "").strip()
         print(f"\n[{project}]")
         try:
-            pages = render_exhibit_pages(str(pdf), dpi=150)
+            pages = render_exhibit_pages(str(pdf), dpi=RENDER_DPI)
         except Exception as e:
             print(f"  render failed: {e}")
             continue
@@ -148,6 +189,7 @@ def main() -> int:
         print("no labeled data")
         return 1
 
+    X_all = [x for x in X_all if x.shape[0] > 0]
     X = np.vstack(X_all)
     y = np.concatenate(y_all)
     project_for_row = np.array(project_for_row)
@@ -155,20 +197,25 @@ def main() -> int:
     for p, pos, neg in project_summaries:
         print(f"  {p:35s} pos={pos:4d} neg={neg:4d}")
 
-    # leave-one-project-out evaluation
-    from sklearn.ensemble import RandomForestClassifier
+    # leave-one-project-out evaluation with gradient boosting (imbalance friendly)
+    from sklearn.ensemble import GradientBoostingClassifier
     print("\n=== LOPO eval ===")
     projects = sorted(set(project_for_row))
+    f1_records = []
     for held in projects:
         test = project_for_row == held
         train = ~test
         if (y[train] == 1).sum() < 5 or (y[test] == 1).sum() < 1:
             continue
-        clf = RandomForestClassifier(
-            n_estimators=200, max_depth=10, min_samples_leaf=2,
-            class_weight="balanced", random_state=42, n_jobs=-1,
+        # class-weight via sample_weight: positives weighted up by inverse frequency
+        n_pos = (y[train] == 1).sum()
+        n_neg = (y[train] == 0).sum()
+        w_pos = n_neg / max(n_pos, 1)
+        sw = np.where(y[train] == 1, w_pos, 1.0)
+        clf = GradientBoostingClassifier(
+            n_estimators=400, max_depth=4, learning_rate=0.05, random_state=42,
         )
-        clf.fit(X[train], y[train])
+        clf.fit(X[train], y[train], sample_weight=sw)
         prob = clf.predict_proba(X[test])[:, list(clf.classes_).index(1)]
         for thresh in (0.5, 0.6, 0.7):
             pred = (prob >= thresh).astype(int)
@@ -181,17 +228,22 @@ def main() -> int:
             print(f"  hold={held:35s} thr={thresh}  P={p:.3f} R={r:.3f} F1={f1:.3f}  (n_test={test.sum()})")
 
     # final model on all data
-    clf = RandomForestClassifier(
-        n_estimators=300, max_depth=12, min_samples_leaf=2,
-        class_weight="balanced", random_state=42, n_jobs=-1,
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    w_pos = n_neg / max(n_pos, 1)
+    sw = np.where(y == 1, w_pos, 1.0)
+    clf = GradientBoostingClassifier(
+        n_estimators=500, max_depth=4, learning_rate=0.05, random_state=42,
     )
-    clf.fit(X, y)
+    clf.fit(X, y, sample_weight=sw)
     out = ROOT / "data" / "stucco_rf.pkl"
     with open(out, "wb") as f:
         pickle.dump({"model": clf, "feature_names": [
             "length", "axis_aligned", "stroke_peak", "stroke_fwhm",
             "stroke_contrast", "junctions", "ink_left", "ink_right",
             "ink_asymmetry", "in_text_frac", "parallel_partner",
+            "x_norm", "y_norm", "x_edge_dist", "y_edge_dist",
+            "inside_footprint", "footprint_boundary_dist",
         ]}, f)
     print(f"\nsaved {out}")
     return 0

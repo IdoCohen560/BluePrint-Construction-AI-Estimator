@@ -240,6 +240,59 @@ def _neighborhood_ink(gray: np.ndarray, s: Segment, box: int = 30) -> tuple[floa
     return side_a, side_b
 
 
+def building_footprint_mask(gray: np.ndarray) -> np.ndarray:
+    """Approximate building footprint: the largest connected blob of ink.
+
+    Architectural plans always have ONE dominant figure (the building) on
+    a white sheet with title block, schedules, and notes around it. We
+    threshold ink, dilate to fill interior, then keep the biggest blob.
+    """
+    h, w = gray.shape
+    ink = (gray < 200).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    closed = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, k, iterations=4)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    if n <= 1:
+        return np.zeros_like(gray)
+    # exclude the background (label 0) and pick largest interior blob whose
+    # bounding box doesn't cover the whole sheet (= page border) and is big
+    best_i, best_area = -1, 0
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if bw >= w * 0.95 and bh >= h * 0.95:
+            continue
+        if area > best_area:
+            best_area = int(area)
+            best_i = i
+    if best_i < 0:
+        return np.zeros_like(gray)
+    return (lab == best_i).astype(np.uint8) * 255
+
+
+def _footprint_distance_features(footprint: np.ndarray, segments: list[Segment]) -> np.ndarray:
+    """For each segment: (midpoint inside footprint?, normalized distance from
+    midpoint to footprint boundary). Exterior walls sit near the boundary.
+    """
+    if footprint is None or footprint.max() == 0:
+        return np.zeros((len(segments), 2), dtype=np.float64)
+    # signed distance: positive inside, zero on boundary; we want distance
+    # from boundary regardless of inside/outside.
+    inv = (footprint == 0).astype(np.uint8) * 255
+    dist_in = cv2.distanceTransform(footprint, cv2.DIST_L2, 3)
+    dist_out = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
+    H, W = footprint.shape
+    diag = float(np.hypot(H, W))
+    out = np.zeros((len(segments), 2), dtype=np.float64)
+    for i, s in enumerate(segments):
+        x = int(np.clip((s.x1 + s.x2) / 2, 0, W - 1))
+        y = int(np.clip((s.y1 + s.y2) / 2, 0, H - 1))
+        inside = footprint[y, x] > 0
+        d = (dist_in[y, x] if inside else dist_out[y, x])
+        out[i, 0] = 1.0 if inside else 0.0
+        out[i, 1] = float(d / diag)
+    return out
+
+
 def _in_text_mask(s: Segment, text_keep: np.ndarray) -> float:
     """Fraction of the segment that lies in masked-text regions (0=keep, 1=text)."""
     h, w = text_keep.shape
@@ -528,7 +581,26 @@ def detect_walls(
         bundle = _load_global_stucco_model()
         if bundle:
             try:
-                stucco_probs = bundle["model"].predict_proba(feats)[
+                H, W = image_bgr.shape[:2]
+                pos_feats = np.array([
+                    [
+                        ((s.x1 + s.x2) / 2) / W,
+                        ((s.y1 + s.y2) / 2) / H,
+                        min(((s.x1 + s.x2) / 2) / W, 1 - ((s.x1 + s.x2) / 2) / W),
+                        min(((s.y1 + s.y2) / 2) / H, 1 - ((s.y1 + s.y2) / 2) / H),
+                    ]
+                    for s in raw
+                ])
+                footprint = building_footprint_mask(gray)
+                fp_feats = _footprint_distance_features(footprint, raw)
+                feats_full = np.hstack([feats, pos_feats, fp_feats]) if pos_feats.size else feats
+                expected = getattr(bundle["model"], "n_features_in_", None)
+                if expected is not None:
+                    if expected == feats.shape[1]:
+                        feats_full = feats
+                    elif expected == feats.shape[1] + pos_feats.shape[1]:
+                        feats_full = np.hstack([feats, pos_feats])
+                stucco_probs = bundle["model"].predict_proba(feats_full)[
                     :, list(bundle["model"].classes_).index(1)
                 ]
                 method = method + "+stucco_rf"
