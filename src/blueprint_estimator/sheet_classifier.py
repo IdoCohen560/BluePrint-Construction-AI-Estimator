@@ -207,8 +207,12 @@ def count_enclosed_rooms(image_bgr: np.ndarray, bbox=None, min_room_area: int = 
 
 def is_floor_plan_visual(image_bgr: np.ndarray, bbox=None, score: float = 0.0,
                          candidates: list | None = None,
-                         min_rooms: int = 4, min_score: float = 8.0,
-                         min_dominance: float = 1.8) -> tuple[bool, dict]:
+                         min_rooms: int = 1, min_score: float = 0.0,
+                         min_dominance: float = 0.0) -> tuple[bool, dict]:
+    """Visual check is now PERMISSIVE by design: it kept rejecting real
+    finish plans because of legend boxes on the same page. Filename rules
+    are doing the heavy lifting; the visual check just records stats.
+    """
     """Visual check for floor-plan-likeness.
 
     Real floor plan: ONE dominant ink component, with >=min_rooms enclosed
@@ -226,12 +230,7 @@ def is_floor_plan_visual(image_bgr: np.ndarray, bbox=None, score: float = 0.0,
     max_frac = room_stats["max_room_frac"]
     pass_rooms = rooms >= min_rooms
     pass_score = score >= min_score
-    # If the biggest enclosed room is more than 10% of the building bbox,
-    # we are looking at a panel-grid detail sheet (parking layouts,
-    # accessibility figures, equipment plans), NOT a real floor plan.
-    # Real multi-unit residential floor plans have many small rooms;
-    # the largest single room rarely exceeds 5% of the building.
-    pass_room_size = max_frac < 0.10
+    pass_room_size = True  # disabled — gave too many false rejects on real plans
 
     dominance = float("inf")
     if candidates and len(candidates) >= 2:

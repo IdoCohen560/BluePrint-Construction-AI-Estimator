@@ -148,9 +148,6 @@ def main() -> None:
         )
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    import base64
-    import streamlit.components.v1 as components
-
     # Collect per-file include flags so totals reflect user picks.
     if "include_in_bid" not in st.session_state:
         st.session_state["include_in_bid"] = {}
@@ -158,7 +155,24 @@ def main() -> None:
     for fr in res["files"]:
         if not fr.get("ok"):
             continue
-        hint = fr.get("wall_info", {}).get("classifier_hint", {})
+        wall_info = fr.get("wall_info", {})
+        method = wall_info.get("method", "")
+        was_skipped = method == "skipped_non_floor_plan"
+
+        if was_skipped:
+            with st.expander(f"⏭️ {fr['filename']}  —  skipped (not a floor plan)", expanded=False):
+                st.warning(fr.get("scale_summary", "Skipped — not a floor plan"))
+                st.caption(
+                    "If this is actually a floor plan and you want it processed, "
+                    "re-upload it after renaming so the filename contains "
+                    "'FLOOR PLAN' (e.g. `MyBuilding_FloorPlan.pdf`). "
+                    "The skip rules use filename keywords like ELEVATION, RCP, "
+                    "SCHEDULE, ACCESSIB, FLOOR AREA, SLAB, etc."
+                )
+                st.session_state["include_in_bid"][fr["filename"]] = False
+            continue
+
+        hint = wall_info.get("classifier_hint", {})
         suggested = hint.get("suggested_run", True)
         hint_label = ("✓ likely floor plan" if suggested
                        else f"⚠ may not be a floor plan: {hint.get('reason','')}")
@@ -186,53 +200,6 @@ def main() -> None:
             hires_png = fr.get("hires_overlay_png")
             hires_pdf = fr.get("hires_overlay_pdf")
             if hires_png:
-                st.markdown("**Zoomable wall overlay (drag / pinch / scroll)**")
-                b64 = base64.b64encode(hires_png).decode("ascii")
-                viewer_id = f"viewer_{abs(hash(fr['filename'])) % (10**8)}"
-                # Use string concat (no f-string in JS body) to avoid brace-escape bugs.
-                html = (
-                    "<div id='__WRAP__' style=\"position:relative;width:100%;height:600px;"
-                    "border:1px solid #ddd;overflow:hidden;background:#fafafa;"
-                    "cursor:grab;touch-action:none;\">"
-                    "<img id='__IMG__' src='data:image/png;base64,__B64__' draggable='false' "
-                    "style=\"position:absolute;left:0;top:0;transform-origin:0 0;"
-                    "user-select:none;max-width:none;max-height:none;\"/>"
-                    "</div>"
-                    "<div style='font-size:12px;color:#666;margin-top:6px;'>"
-                    "Mouse wheel = zoom · Click+drag = pan · Double-click = reset"
-                    "</div>"
-                    "<script>"
-                    "(function(){"
-                    "var wrap=document.getElementById('__WRAP__');"
-                    "var img=document.getElementById('__IMG__');"
-                    "var scale=1,ox=0,oy=0,drag=false,sx=0,sy=0;"
-                    "function apply(){img.style.transform='translate('+ox+'px,'+oy+'px) scale('+scale+')';}"
-                    "function fit(){var r=wrap.getBoundingClientRect();"
-                    "scale=Math.min(r.width/img.naturalWidth,r.height/img.naturalHeight);"
-                    "ox=(r.width-img.naturalWidth*scale)/2;"
-                    "oy=(r.height-img.naturalHeight*scale)/2;apply();}"
-                    "img.addEventListener('load',fit);if(img.complete)fit();"
-                    "wrap.addEventListener('wheel',function(e){e.preventDefault();"
-                    "var r=wrap.getBoundingClientRect();"
-                    "var cx=e.clientX-r.left,cy=e.clientY-r.top;"
-                    "var f=e.deltaY<0?1.15:1/1.15;"
-                    "var ns=Math.max(0.05,Math.min(40,scale*f));"
-                    "ox=cx-(cx-ox)*(ns/scale);oy=cy-(cy-oy)*(ns/scale);"
-                    "scale=ns;apply();},{passive:false});"
-                    "wrap.addEventListener('mousedown',function(e){drag=true;"
-                    "sx=e.clientX-ox;sy=e.clientY-oy;wrap.style.cursor='grabbing';});"
-                    "window.addEventListener('mousemove',function(e){if(!drag)return;"
-                    "ox=e.clientX-sx;oy=e.clientY-sy;apply();});"
-                    "window.addEventListener('mouseup',function(){drag=false;wrap.style.cursor='grab';});"
-                    "wrap.addEventListener('dblclick',fit);"
-                    "})();"
-                    "</script>"
-                )
-                html = (html.replace("__WRAP__", viewer_id + "_wrap")
-                            .replace("__IMG__", viewer_id + "_img")
-                            .replace("__B64__", b64))
-                components.html(html, height=660, scrolling=False)
-
                 d1, d2 = st.columns(2)
                 d1.download_button(
                     "⬇ Download high-res PNG (1920px)",
@@ -247,6 +214,10 @@ def main() -> None:
                         file_name=f"{fr['filename'].rsplit('.',1)[0]}_walls.pdf",
                         mime="application/pdf",
                     )
+                st.caption(
+                    "Open the downloaded PNG or PDF in your viewer to zoom in — "
+                    "browsers handle that better than the in-page widget."
+                )
 
             if fr.get("ranked_html"):
                 st.markdown("**Suggested materials (this file, one per trade)**", unsafe_allow_html=True)

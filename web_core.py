@@ -288,7 +288,8 @@ def run_single_file(
     catalog: pd.DataFrame | None = None,
     dpi: int = DEFAULT_RASTER_DPI,
     user_roi: tuple[int, int, int, int] | None = None,
-    skip_classifier_gate: bool = True,
+    skip_classifier_gate: bool = False,
+    force_run: bool = False,
 ) -> dict[str, Any]:
     """One blueprint file: ingest, infer scale, walls, quantities, material ranking."""
     ensure_src_path()
@@ -366,7 +367,7 @@ def run_single_file(
         else:
             ingest_image_for_detect = ingest.image_bgr
 
-        if (not skip_classifier_gate) and (not _take_ok) and user_roi is None:
+        if (not skip_classifier_gate) and (not _take_ok) and user_roi is None and not force_run:
             wall_info = {
                 "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
                 "method": "skipped_non_floor_plan", "stucco_linear_ft": 0.0,
