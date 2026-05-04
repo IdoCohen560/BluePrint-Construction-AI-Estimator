@@ -115,6 +115,11 @@ def main() -> None:
         )
 
     st.subheader("Per-file results")
+    st.caption(
+        "Wall detection runs on every uploaded sheet. Use the **'Include in bid'** "
+        "checkbox to pick which pages count. The classifier hint (✓ likely floor plan / "
+        "⚠ may not be a floor plan) is just a suggestion — you choose."
+    )
     rows = []
     for fr in res["files"]:
         if not fr.get("ok"):
@@ -146,10 +151,26 @@ def main() -> None:
     import base64
     import streamlit.components.v1 as components
 
+    # Collect per-file include flags so totals reflect user picks.
+    if "include_in_bid" not in st.session_state:
+        st.session_state["include_in_bid"] = {}
+
     for fr in res["files"]:
         if not fr.get("ok"):
             continue
-        with st.expander(fr["filename"]):
+        hint = fr.get("wall_info", {}).get("classifier_hint", {})
+        suggested = hint.get("suggested_run", True)
+        hint_label = ("✓ likely floor plan" if suggested
+                       else f"⚠ may not be a floor plan: {hint.get('reason','')}")
+        default = st.session_state["include_in_bid"].get(fr["filename"], suggested)
+        with st.expander(f"{fr['filename']}  —  {hint_label}", expanded=suggested):
+            include = st.checkbox(
+                "✅ Include this page in bid total",
+                value=default,
+                key=f"inc_{fr['filename']}",
+                help="The classifier suggestion is just a hint. You decide.",
+            )
+            st.session_state["include_in_bid"][fr["filename"]] = include
             st.write(fr.get("scale_notes", ""))
             c1, c2 = st.columns(2)
             if fr.get("preview_png"):
@@ -235,11 +256,16 @@ def main() -> None:
 
     proj = res["project"]
     st.subheader("Project totals")
-    st.metric("Total linear feet", f"{proj['total_linear_ft']:,.2f} ft")
-    st.metric("Total rough wall area (one side)", f"{proj['total_wall_area']:,.1f} sq ft")
+    # Only sum files the user has marked as 'include in bid'
+    included = {n for n, v in st.session_state.get("include_in_bid", {}).items() if v}
+    incl_files = [fr for fr in res["files"] if fr.get("ok") and fr["filename"] in included]
+    incl_lf = sum(fr.get("linear_ft", 0.0) for fr in incl_files)
+    incl_wa = sum(fr.get("wall_area", 0.0) for fr in incl_files)
+    st.metric(f"Total linear feet ({len(incl_files)} sheet(s) included)", f"{incl_lf:,.2f} ft")
+    st.metric("Total rough wall area (one side)", f"{incl_wa:,.1f} sq ft")
 
-    # Stucco-only takeoff (from trained classifier)
-    stucco_lf = sum(fr.get("stucco_linear_ft", 0.0) for fr in res["files"] if fr.get("ok"))
+    # Stucco-only takeoff (from trained classifier), respecting user picks
+    stucco_lf = sum(fr.get("stucco_linear_ft", 0.0) for fr in incl_files)
     stucco_yds = stucco_lf * float(ceiling_ft) / 9.0
     st.subheader("Stucco bid takeoff (AI)")
     sc1, sc2 = st.columns(2)

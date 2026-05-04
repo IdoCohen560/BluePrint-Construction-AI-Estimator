@@ -287,6 +287,8 @@ def run_single_file(
     ceiling_ft: float,
     catalog: pd.DataFrame | None = None,
     dpi: int = DEFAULT_RASTER_DPI,
+    user_roi: tuple[int, int, int, int] | None = None,
+    skip_classifier_gate: bool = True,
 ) -> dict[str, Any]:
     """One blueprint file: ingest, infer scale, walls, quantities, material ranking."""
     ensure_src_path()
@@ -341,16 +343,30 @@ def run_single_file(
         from blueprint_estimator.sheet_classifier import should_run_takeoff
         from blueprint_estimator.building_isolator import isolate_building
 
-        # Pre-flight: filename + visual room-count check. Skip non-floor-plan
-        # sheets (schedules, elevations, accessibility details, etc.) so we
-        # never produce wall counts on them.
+        # Pre-flight is a HINT, not a gate. Default behavior runs detection on
+        # every page; the user picks which pages count toward the bid in the UI.
+        # Pass skip_classifier_gate=False to re-enable the old "auto-skip"
+        # behavior (kept for testing).
         _bmask, _binfo = isolate_building(ingest.image_bgr)
         _bbox = _binfo.get("best_bbox")
         _bscore = float(_binfo.get("best_score", 0.0))
         _take_ok, _take_meta = should_run_takeoff(filename, ingest.image_bgr,
                                                     bbox=_bbox, score=_bscore,
                                                     candidates=_binfo.get("candidates"))
-        if not _take_ok:
+        # Apply user-supplied ROI crop BEFORE detection — this is the right
+        # source of truth for "which region is the floor plan."
+        if user_roi is not None:
+            ux, uy, uw, uh = user_roi
+            H_full, W_full = ingest.image_bgr.shape[:2]
+            ux = max(0, min(W_full - 1, int(ux)))
+            uy = max(0, min(H_full - 1, int(uy)))
+            uw = max(1, min(W_full - ux, int(uw)))
+            uh = max(1, min(H_full - uy, int(uh)))
+            ingest_image_for_detect = ingest.image_bgr[uy : uy + uh, ux : ux + uw].copy()
+        else:
+            ingest_image_for_detect = ingest.image_bgr
+
+        if (not skip_classifier_gate) and (not _take_ok) and user_roi is None:
             wall_info = {
                 "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
                 "method": "skipped_non_floor_plan", "stucco_linear_ft": 0.0,
@@ -380,8 +396,8 @@ def run_single_file(
                 "hires_overlay_png": b"", "hires_overlay_pdf": b"",
             }
 
-        decision = classify_page(ingest.image_bgr)
-        det_image = ingest.image_bgr
+        decision = classify_page(ingest_image_for_detect)
+        det_image = ingest_image_for_detect
         if decision.page_kind == "skip":
             # Vision LLM says this isn't a plan/elevation worth running takeoff on.
             wall_info = {
@@ -409,14 +425,22 @@ def run_single_file(
         stucco_linear_ft = total_linear_feet_segments(stucco_segments, inf.scale_config) if stucco_segments else 0.0
         wall_info["stucco_linear_ft"] = float(stucco_linear_ft)
         wall_info["stucco_segments"] = len(stucco_segments)
-        overlay_bgr = draw_segments_overlay(ingest.image_bgr, segments)
-        preview_png = png_bytes_bgr(ingest.image_bgr)
+        # Render preview/overlay against the SAME image we ran detection on
+        # (the user crop if supplied, otherwise the full page).
+        overlay_bgr = draw_segments_overlay(det_image, segments)
+        preview_png = png_bytes_bgr(det_image)
         overlay_png = png_bytes_bgr(overlay_bgr)
-        hires_overlay_png = high_res_overlay_png(ingest.image_bgr, segments, target_long_side=1920)
+        hires_overlay_png = high_res_overlay_png(det_image, segments, target_long_side=1920)
         try:
-            hires_overlay_pdf = overlay_pdf_bytes(ingest.image_bgr, segments, target_long_side=2400)
+            hires_overlay_pdf = overlay_pdf_bytes(det_image, segments, target_long_side=2400)
         except Exception:
             hires_overlay_pdf = b""
+        wall_info["classifier_hint"] = {
+            "suggested_run": _take_ok,
+            "reason": _take_meta.get("skip_reason") or "looks like a floor plan",
+            "iso_score": _bscore,
+        }
+        wall_info["user_roi"] = list(user_roi) if user_roi is not None else None
     else:
         if suffix == ".dxf":
             inf = infer_scale_vector_dxf_bytes(raw, filename)
