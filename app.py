@@ -167,62 +167,50 @@ def main() -> None:
             if hires_png:
                 st.markdown("**Zoomable wall overlay (drag / pinch / scroll)**")
                 b64 = base64.b64encode(hires_png).decode("ascii")
-                # OpenSeadragon-free panzoom via inline HTML/JS — no extra deps
-                components.html(
-                    f"""
-                    <div id='wrap' style='position:relative;width:100%;height:600px;border:1px solid #ddd;
-                        overflow:hidden;background:#fafafa;cursor:grab;touch-action:none;'>
-                      <img id='img' src='data:image/png;base64,{b64}' draggable='false'
-                           style='position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;
-                                  max-width:none;max-height:none;'/>
-                    </div>
-                    <div style='font-size:12px;color:#666;margin-top:4px;'>
-                      Scroll = zoom · Drag = pan · Double-click = reset
-                    </div>
-                    <script>
-                    (function() {{
-                      const wrap = document.getElementById('wrap');
-                      const img = document.getElementById('img');
-                      let scale = 1, ox = 0, oy = 0, dragging = false, sx = 0, sy = 0;
-                      function fit() {{
-                        const r = wrap.getBoundingClientRect();
-                        scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
-                        ox = (r.width - img.naturalWidth * scale) / 2;
-                        oy = (r.height - img.naturalHeight * scale) / 2;
-                        apply();
-                      }}
-                      function apply() {{
-                        img.style.transform = `translate(${{ox}}px,${{oy}}px) scale(${{scale}})`;
-                      }}
-                      img.onload = fit;
-                      if (img.complete) fit();
-                      wrap.addEventListener('wheel', e => {{
-                        e.preventDefault();
-                        const r = wrap.getBoundingClientRect();
-                        const cx = e.clientX - r.left, cy = e.clientY - r.top;
-                        const f = e.deltaY < 0 ? 1.15 : 1/1.15;
-                        const ns = Math.max(0.1, Math.min(20, scale * f));
-                        ox = cx - (cx - ox) * (ns / scale);
-                        oy = cy - (cy - oy) * (ns / scale);
-                        scale = ns; apply();
-                      }}, {{ passive: false }});
-                      wrap.addEventListener('mousedown', e => {{
-                        dragging = true; sx = e.clientX - ox; sy = e.clientY - oy;
-                        wrap.style.cursor = 'grabbing';
-                      }});
-                      window.addEventListener('mousemove', e => {{
-                        if (!dragging) return;
-                        ox = e.clientX - sx; oy = e.clientY - sy; apply();
-                      }});
-                      window.addEventListener('mouseup', () => {{
-                        dragging = false; wrap.style.cursor = 'grab';
-                      }});
-                      wrap.addEventListener('dblclick', fit);
-                    }})();
-                    </script>
-                    """,
-                    height=650,
+                viewer_id = f"viewer_{abs(hash(fr['filename'])) % (10**8)}"
+                # Use string concat (no f-string in JS body) to avoid brace-escape bugs.
+                html = (
+                    "<div id='__WRAP__' style=\"position:relative;width:100%;height:600px;"
+                    "border:1px solid #ddd;overflow:hidden;background:#fafafa;"
+                    "cursor:grab;touch-action:none;\">"
+                    "<img id='__IMG__' src='data:image/png;base64,__B64__' draggable='false' "
+                    "style=\"position:absolute;left:0;top:0;transform-origin:0 0;"
+                    "user-select:none;max-width:none;max-height:none;\"/>"
+                    "</div>"
+                    "<div style='font-size:12px;color:#666;margin-top:6px;'>"
+                    "Mouse wheel = zoom · Click+drag = pan · Double-click = reset"
+                    "</div>"
+                    "<script>"
+                    "(function(){"
+                    "var wrap=document.getElementById('__WRAP__');"
+                    "var img=document.getElementById('__IMG__');"
+                    "var scale=1,ox=0,oy=0,drag=false,sx=0,sy=0;"
+                    "function apply(){img.style.transform='translate('+ox+'px,'+oy+'px) scale('+scale+')';}"
+                    "function fit(){var r=wrap.getBoundingClientRect();"
+                    "scale=Math.min(r.width/img.naturalWidth,r.height/img.naturalHeight);"
+                    "ox=(r.width-img.naturalWidth*scale)/2;"
+                    "oy=(r.height-img.naturalHeight*scale)/2;apply();}"
+                    "img.addEventListener('load',fit);if(img.complete)fit();"
+                    "wrap.addEventListener('wheel',function(e){e.preventDefault();"
+                    "var r=wrap.getBoundingClientRect();"
+                    "var cx=e.clientX-r.left,cy=e.clientY-r.top;"
+                    "var f=e.deltaY<0?1.15:1/1.15;"
+                    "var ns=Math.max(0.05,Math.min(40,scale*f));"
+                    "ox=cx-(cx-ox)*(ns/scale);oy=cy-(cy-oy)*(ns/scale);"
+                    "scale=ns;apply();},{passive:false});"
+                    "wrap.addEventListener('mousedown',function(e){drag=true;"
+                    "sx=e.clientX-ox;sy=e.clientY-oy;wrap.style.cursor='grabbing';});"
+                    "window.addEventListener('mousemove',function(e){if(!drag)return;"
+                    "ox=e.clientX-sx;oy=e.clientY-sy;apply();});"
+                    "window.addEventListener('mouseup',function(){drag=false;wrap.style.cursor='grab';});"
+                    "wrap.addEventListener('dblclick',fit);"
+                    "})();"
+                    "</script>"
                 )
+                html = (html.replace("__WRAP__", viewer_id + "_wrap")
+                            .replace("__IMG__", viewer_id + "_img")
+                            .replace("__B64__", b64))
+                components.html(html, height=660, scrolling=False)
 
                 d1, d2 = st.columns(2)
                 d1.download_button(

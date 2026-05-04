@@ -348,7 +348,8 @@ def run_single_file(
         _bbox = _binfo.get("best_bbox")
         _bscore = float(_binfo.get("best_score", 0.0))
         _take_ok, _take_meta = should_run_takeoff(filename, ingest.image_bgr,
-                                                    bbox=_bbox, score=_bscore)
+                                                    bbox=_bbox, score=_bscore,
+                                                    candidates=_binfo.get("candidates"))
         if not _take_ok:
             wall_info = {
                 "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
@@ -372,10 +373,8 @@ def run_single_file(
                 "preview_png": preview_png, "overlay_png": overlay_png,
                 "ingest_source": ingest.source, "segment_count": 0,
                 "scale_method": "", "scale_confidence": 0.0,
-                "scale_notes": f"Skipped: {_take_meta.get('filename_reason','')} | "
-                               f"rooms={_take_meta.get('rooms',0)} | "
-                               f"score={_take_meta.get('iso_score',0):.1f}",
-                "scale_summary": "Skipped — not a floor plan",
+                "scale_notes": _take_meta.get("skip_reason", "Not a floor plan"),
+                "scale_summary": "⚠ Skipped — not a floor plan: " + _take_meta.get("skip_reason", "filename / visual check failed"),
                 "wall_info": wall_info, "stucco_linear_ft": 0.0,
                 "stucco_wall_yards_sq": 0.0,
                 "hires_overlay_png": b"", "hires_overlay_pdf": b"",

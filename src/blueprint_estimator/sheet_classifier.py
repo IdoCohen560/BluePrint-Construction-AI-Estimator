@@ -144,10 +144,19 @@ def filename_says_floor_plan(filename: str) -> tuple[bool, str]:
     return True, "ambiguous"
 
 
-def count_enclosed_rooms(image_bgr: np.ndarray, bbox: tuple[int, int, int, int] | None = None,
-                          min_room_area: int = 1500) -> int:
-    """Connected white regions inside the building bbox that don't touch
-    the bbox boundary. Floor plans have many; details have 0–3.
+def measure_rooms(image_bgr: np.ndarray, bbox: tuple[int, int, int, int] | None = None,
+                   min_room_area: int = 1500) -> dict:
+    """Return room statistics inside the building bbox.
+
+    Returns:
+      n_rooms             — count of enclosed paper regions >= min_room_area
+      max_room_frac       — area of the biggest enclosed room / bbox area
+      median_room_frac    — median of room area / bbox area
+      area_cv             — coefficient of variation of room areas
+
+    A real floor plan: many rooms (10+), max_room_frac < 0.25, varied sizes.
+    A panel-grid detail sheet: few rooms (4-12), max_room_frac > 0.25,
+                                similar sizes (low cv).
     """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     H, W = gray.shape
@@ -157,45 +166,117 @@ def count_enclosed_rooms(image_bgr: np.ndarray, bbox: tuple[int, int, int, int] 
         x, y, w, h = bbox
     x = max(0, x); y = max(0, y)
     w = min(W - x, w); h = min(H - y, h)
+    bbox_area = max(w * h, 1)
     if w <= 30 or h <= 30:
-        return 0
+        return {"n_rooms": 0, "max_room_frac": 0.0, "median_room_frac": 0.0,
+                "area_cv": 0.0, "areas": []}
 
     crop = gray[y:y + h, x:x + w]
-    # ink = dark, paper = bright. We want enclosed paper regions.
-    paper = (crop > 200).astype(np.uint8) * 255
+    # Dilate ink so doorways and small wall gaps close — otherwise the entire
+    # interior of a real floor plan is ONE connected paper region (rooms
+    # bleed into each other through openings).
+    ink = (crop < 200).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    ink_closed = cv2.dilate(ink, k, iterations=3)
+    paper = cv2.bitwise_not(ink_closed)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(paper, connectivity=4)
-    rooms = 0
+    areas: list[int] = []
     for i in range(1, n):
         cx, cy, cw, ch, area = stats[i]
         if area < min_room_area:
             continue
-        # exclude regions touching the crop border (= exterior whitespace)
         if cx <= 1 or cy <= 1 or cx + cw >= w - 1 or cy + ch >= h - 1:
             continue
-        rooms += 1
-    return rooms
+        areas.append(int(area))
+    if not areas:
+        return {"n_rooms": 0, "max_room_frac": 0.0, "median_room_frac": 0.0,
+                "area_cv": 0.0, "areas": []}
+    arr = np.array(areas, dtype=np.float64)
+    return {
+        "n_rooms": int(len(areas)),
+        "max_room_frac": float(arr.max() / bbox_area),
+        "median_room_frac": float(np.median(arr) / bbox_area),
+        "area_cv": float(arr.std() / max(arr.mean(), 1)),
+        "areas": areas,
+    }
+
+
+def count_enclosed_rooms(image_bgr: np.ndarray, bbox=None, min_room_area: int = 1500) -> int:
+    return measure_rooms(image_bgr, bbox, min_room_area)["n_rooms"]
 
 
 def is_floor_plan_visual(image_bgr: np.ndarray, bbox=None, score: float = 0.0,
-                         min_rooms: int = 4, min_score: float = 8.0) -> tuple[bool, dict]:
+                         candidates: list | None = None,
+                         min_rooms: int = 4, min_score: float = 8.0,
+                         min_dominance: float = 1.8) -> tuple[bool, dict]:
     """Visual check for floor-plan-likeness.
 
-    Floor plan must have >=min_rooms enclosed rooms inside the building
-    bbox AND a building-isolator score >= min_score.
+    Real floor plan: ONE dominant ink component, with >=min_rooms enclosed
+    paper regions inside it, score >= min_score.
+
+    Tile-of-details (parking layouts, accessibility figures, equipment
+    sheets, restroom enlargements arranged in a grid): multiple
+    components with similar scores. We reject when the winning
+    component's area is less than `min_dominance` times the
+    second-place component's area, because that signature is a sheet of
+    independent panels, not a single building.
     """
-    rooms = count_enclosed_rooms(image_bgr, bbox)
-    is_plan = rooms >= min_rooms and score >= min_score
-    return is_plan, {"rooms": rooms, "score": float(score)}
+    room_stats = measure_rooms(image_bgr, bbox)
+    rooms = room_stats["n_rooms"]
+    max_frac = room_stats["max_room_frac"]
+    pass_rooms = rooms >= min_rooms
+    pass_score = score >= min_score
+    # If the biggest enclosed room is more than 10% of the building bbox,
+    # we are looking at a panel-grid detail sheet (parking layouts,
+    # accessibility figures, equipment plans), NOT a real floor plan.
+    # Real multi-unit residential floor plans have many small rooms;
+    # the largest single room rarely exceeds 5% of the building.
+    pass_room_size = max_frac < 0.10
+
+    dominance = float("inf")
+    if candidates and len(candidates) >= 2:
+        a0 = float(candidates[0].get("area", 0))
+        a1 = float(candidates[1].get("area", 0))
+        dominance = a0 / max(a1, 1.0)
+    pass_dominance = dominance >= min_dominance
+
+    is_plan = pass_rooms and pass_score and pass_dominance and pass_room_size
+    return is_plan, {
+        "rooms": rooms, "score": float(score),
+        "dominance_ratio": float(dominance) if dominance != float("inf") else None,
+        "max_room_frac": max_frac,
+        "pass_rooms": pass_rooms, "pass_score": pass_score,
+        "pass_dominance": pass_dominance, "pass_room_size": pass_room_size,
+    }
 
 
 def should_run_takeoff(filename: str, image_bgr: np.ndarray, bbox=None,
-                        score: float = 0.0) -> tuple[bool, dict]:
+                        score: float = 0.0,
+                        candidates: list | None = None) -> tuple[bool, dict]:
     """Top-level decision combining filename + visual signature."""
     fn_ok, fn_reason = filename_says_floor_plan(filename)
-    vi_ok, vi_meta = is_floor_plan_visual(image_bgr, bbox, score)
+    vi_ok, vi_meta = is_floor_plan_visual(image_bgr, bbox, score, candidates=candidates)
     decision = fn_ok and vi_ok
+    reason_parts = []
+    if not fn_ok:
+        reason_parts.append(f"filename: {fn_reason}")
+    if not vi_meta["pass_rooms"]:
+        reason_parts.append(f"only {vi_meta['rooms']} enclosed rooms (need >=4)")
+    if not vi_meta["pass_score"]:
+        reason_parts.append(f"isolator score {vi_meta['score']:.1f} < 8 (no dominant building)")
+    if not vi_meta["pass_dominance"]:
+        d = vi_meta.get("dominance_ratio")
+        reason_parts.append(
+            f"top component only {d:.1f}x bigger than runner-up — looks like a tile of detail panels, not one building"
+            if d is not None else "no dominant component"
+        )
+    if not vi_meta.get("pass_room_size", True):
+        f = vi_meta.get("max_room_frac", 0)
+        reason_parts.append(
+            f"biggest enclosed area = {f*100:.0f}% of building bbox — too big for a room, looks like a detail panel"
+        )
     return decision, {
         "filename_pass": fn_ok, "filename_reason": fn_reason,
-        "visual_pass": vi_ok, "rooms": vi_meta["rooms"],
-        "iso_score": vi_meta["score"],
+        "visual_pass": vi_ok, **vi_meta,
+        "skip_reason": "; ".join(reason_parts) if reason_parts else "",
     }
