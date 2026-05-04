@@ -164,6 +164,31 @@ def main() -> None:
     st.metric("Total linear feet", f"{proj['total_linear_ft']:,.2f} ft")
     st.metric("Total rough wall area (one side)", f"{proj['total_wall_area']:,.1f} sq ft")
 
+    # Stucco-only takeoff (from trained classifier)
+    stucco_lf = sum(fr.get("stucco_linear_ft", 0.0) for fr in res["files"] if fr.get("ok"))
+    stucco_yds = stucco_lf * float(ceiling_ft) / 9.0
+    st.subheader("Stucco bid takeoff (AI)")
+    sc1, sc2 = st.columns(2)
+    sc1.metric("Stucco linear feet", f"{stucco_lf:,.1f} ft")
+    sc2.metric("Stucco wall yards (sq yd)", f"{stucco_yds:,.1f} sy")
+    project_name = st.text_input("Project name for bid", value="My Project")
+    if st.button("Generate populated bid spreadsheet"):
+        try:
+            from blueprint_estimator.bid_writer import fill_bid_template
+            import tempfile, os
+            tmp_out = os.path.join(tempfile.gettempdir(), "bid_filled.xlsx")
+            out_path = fill_bid_template(project_name, wall_yards=stucco_yds, ceiling_yards=0.0,
+                                         out_path=tmp_out)
+            with open(out_path, "rb") as f:
+                st.download_button(
+                    label=f"Download bid for {project_name}",
+                    data=f.read(),
+                    file_name=f"bid_{project_name.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+        except FileNotFoundError as e:
+            st.error(f"Bid template missing: {e}")
+
     st.subheader("Project material estimation")
     if proj.get("materials_enabled"):
         st.dataframe(
