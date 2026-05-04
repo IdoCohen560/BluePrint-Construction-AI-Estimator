@@ -252,7 +252,8 @@ def run_single_file(
             inf = infer_scale_raster_from_pdf(raw, dpi=int(dpi))
         else:
             inf = infer_scale_raster_from_image_bgr(ingest.image_bgr, dpi=int(dpi))
-        segments, graph = image_to_wall_segments(ingest.image_bgr, merge=True)
+        from blueprint_estimator.wall_detector import detect_walls
+        segments, graph, wall_info = detect_walls(ingest.image_bgr, use_text_mask=True)
         linear_ft = total_linear_feet_segments(segments, inf.scale_config)
         overlay_bgr = draw_segments_overlay(ingest.image_bgr, segments)
         preview_png = png_bytes_bgr(ingest.image_bgr)
@@ -264,6 +265,7 @@ def run_single_file(
             inf = infer_scale_vector_json()
         vf = inf.vector_feet_per_unit or (1.0 / 12.0)
         linear_ft = total_segment_length(segments) * float(vf)
+        wall_info = {"raw_segments": len(segments), "wall_segments": len(segments), "mean_confidence": 1.0, "text_masked": False}
 
     wall_area = wall_area_sheetboard_ft2(linear_ft, float(ceiling_ft))
     smry = scale_summary(inf, int(dpi)) if inf else ""
@@ -312,6 +314,7 @@ def run_single_file(
         "scale_confidence": inf.confidence if inf else 0.0,
         "scale_notes": inf.notes if inf else "",
         "scale_summary": smry,
+        "wall_info": wall_info,
     }
 
 

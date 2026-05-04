@@ -123,7 +123,20 @@ def segments_to_wall_graph(segments: list[Segment], snap_tol: float = 5.0) -> Wa
 def image_to_wall_segments(
     image_bgr: np.ndarray,
     merge: bool = True,
+    use_wall_detector: bool = True,
 ) -> tuple[list[Segment], WallGraph]:
+    """Extract wall centerlines from a blueprint image.
+
+    With `use_wall_detector=True` (default) this filters text and only keeps
+    double-line wall pairs — no walls means an empty list, not noise.
+    """
+    if use_wall_detector:
+        # local import to avoid cycle
+        from blueprint_estimator.wall_detector import detect_walls
+
+        walls, graph, _info = detect_walls(image_bgr, use_text_mask=True)
+        return walls, graph
+
     raw = segments_from_image_hough(image_bgr)
     segs = _merge_collinear(raw) if merge and raw else raw
     graph = segments_to_wall_graph(segs)
