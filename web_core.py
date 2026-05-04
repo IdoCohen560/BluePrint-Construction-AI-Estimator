@@ -257,6 +257,11 @@ def run_single_file(
             ingest.image_bgr, use_text_mask=True, scale_config=inf.scale_config
         )
         linear_ft = total_linear_feet_segments(segments, inf.scale_config)
+        # If stucco classifier is loaded, also compute stucco-only linear feet
+        stucco_segments = [s for s in segments if s.meta.get("stucco_probability", 0.0) >= 0.5]
+        stucco_linear_ft = total_linear_feet_segments(stucco_segments, inf.scale_config) if stucco_segments else 0.0
+        wall_info["stucco_linear_ft"] = float(stucco_linear_ft)
+        wall_info["stucco_segments"] = len(stucco_segments)
         overlay_bgr = draw_segments_overlay(ingest.image_bgr, segments)
         preview_png = png_bytes_bgr(ingest.image_bgr)
         overlay_png = png_bytes_bgr(overlay_bgr)
@@ -317,6 +322,8 @@ def run_single_file(
         "scale_notes": inf.notes if inf else "",
         "scale_summary": smry,
         "wall_info": wall_info,
+        "stucco_linear_ft": wall_info.get("stucco_linear_ft", 0.0),
+        "stucco_wall_yards_sq": (wall_info.get("stucco_linear_ft", 0.0) * float(ceiling_ft) / 9.0),
     }
 
 

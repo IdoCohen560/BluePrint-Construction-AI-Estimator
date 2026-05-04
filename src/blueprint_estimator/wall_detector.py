@@ -400,12 +400,40 @@ def _bootstrap_labels(
 
 # --------------------------------- detector ---------------------------------
 
+_GLOBAL_STUCCO_MODEL = None
+
+
+def _load_global_stucco_model():
+    global _GLOBAL_STUCCO_MODEL
+    if _GLOBAL_STUCCO_MODEL is not None:
+        return _GLOBAL_STUCCO_MODEL
+    import os
+    import pickle
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "..", "data", "stucco_rf.pkl"),
+        os.path.join(here, "..", "..", "..", "data", "stucco_rf.pkl"),
+    ]
+    for p in candidates:
+        p = os.path.abspath(p)
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as f:
+                    _GLOBAL_STUCCO_MODEL = pickle.load(f)
+                return _GLOBAL_STUCCO_MODEL
+            except Exception:
+                pass
+    _GLOBAL_STUCCO_MODEL = False
+    return False
+
+
 def detect_walls(
     image_bgr: np.ndarray,
     use_text_mask: bool = True,
     threshold: float = WALL_PROB_THRESHOLD,
     scale_config=None,
     feet_per_pixel: float | None = None,
+    use_stucco_model: bool = True,
 ) -> tuple[list[Segment], WallGraph, dict]:
     """Hybrid geometric + learned image-recognition wall detector.
 
@@ -494,11 +522,26 @@ def detect_walls(
         probs[(feats[:, JUNC] == 0) & (feats[:, PARP] < 0.4)] = 0.0
         probs = np.clip(probs, 0.0, 1.0)
 
+    # Optional second pass: trained stucco classifier (from completed exhibits)
+    stucco_probs = None
+    if use_stucco_model:
+        bundle = _load_global_stucco_model()
+        if bundle:
+            try:
+                stucco_probs = bundle["model"].predict_proba(feats)[
+                    :, list(bundle["model"].classes_).index(1)
+                ]
+                method = method + "+stucco_rf"
+            except Exception:
+                stucco_probs = None
+
     walls: list[Segment] = []
-    for s, p in zip(raw, probs):
+    for i, (s, p) in enumerate(zip(raw, probs)):
         if p >= threshold:
             meta = dict(s.meta)
             meta.update({"confidence": float(p), "source": "wall_detector"})
+            if stucco_probs is not None:
+                meta["stucco_probability"] = float(stucco_probs[i])
             walls.append(Segment(s.x1, s.y1, s.x2, s.y2, meta=meta))
 
     graph = segments_to_wall_graph(walls)

@@ -46,22 +46,34 @@ def _mask_for_band(hsv: np.ndarray, lo: tuple[int, int, int], hi: tuple[int, int
 
 
 def extract_color_masks(image_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return (red_mask, cyan_mask) as uint8 0/255 arrays."""
+    """Return (plan_highlight_mask, elevation_highlight_mask) as uint8 0/255 arrays.
+
+    Different estimators use different colors for the same intent:
+      - Plan highlights: red, yellow, green, magenta — any warm/non-blue saturated tint.
+      - Elevation highlights: cyan / blue — large translucent fills.
+
+    We segment by HSV saturation+value to catch any translucent overlay,
+    then split by hue: blue/cyan goes to the elevation mask, everything
+    else (red/yellow/green/magenta) goes to the plan mask. Black ink and
+    white paper are excluded by saturation threshold.
+    """
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
 
-    red = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for lo, hi in RED_HSV_BANDS:
-        red = cv2.bitwise_or(red, _mask_for_band(hsv, lo, hi))
+    # any saturated, bright pixel = highlight (excludes black ink + white paper)
+    saturated = ((s >= 60) & (v >= 140)).astype(np.uint8) * 255
 
-    cyan = _mask_for_band(hsv, *CYAN_HSV_BAND)
+    # split by hue: blues/cyans (H 85-130) → elevation; everything else → plan
+    is_blue = (h >= 85) & (h <= 130)
+    elevation = cv2.bitwise_and(saturated, (is_blue.astype(np.uint8) * 255))
+    plan = cv2.bitwise_and(saturated, ((~is_blue).astype(np.uint8) * 255))
 
-    # close small holes from anti-aliased edges, drop noise
     k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    red = cv2.morphologyEx(red, cv2.MORPH_CLOSE, k, iterations=2)
-    cyan = cv2.morphologyEx(cyan, cv2.MORPH_CLOSE, k, iterations=2)
-    red = cv2.morphologyEx(red, cv2.MORPH_OPEN, k, iterations=1)
-    cyan = cv2.morphologyEx(cyan, cv2.MORPH_OPEN, k, iterations=1)
-    return red, cyan
+    plan = cv2.morphologyEx(plan, cv2.MORPH_CLOSE, k, iterations=2)
+    elevation = cv2.morphologyEx(elevation, cv2.MORPH_CLOSE, k, iterations=2)
+    plan = cv2.morphologyEx(plan, cv2.MORPH_OPEN, k, iterations=1)
+    elevation = cv2.morphologyEx(elevation, cv2.MORPH_OPEN, k, iterations=1)
+    return plan, elevation
 
 
 def render_exhibit_pages(pdf_path: str, dpi: int = 150) -> list[ExhibitPage]:
