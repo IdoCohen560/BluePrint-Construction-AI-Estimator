@@ -35,6 +35,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from blueprint_estimator.exhibit_mask import render_exhibit_pages  # noqa: E402
 from blueprint_estimator.scale_qty import ScaleConfig  # noqa: E402
 from blueprint_estimator.wall_detector import detect_walls  # noqa: E402
+from blueprint_estimator.sheet_classifier import filename_says_floor_plan, count_enclosed_rooms  # noqa: E402
+from blueprint_estimator.building_isolator import isolate_building  # noqa: E402
 
 try:
     import fitz  # PyMuPDF
@@ -96,6 +98,15 @@ def process_pdf(pdf_path: Path, project_label: str, max_pages: int, exhibits_for
     project_dir.mkdir(parents=True, exist_ok=True)
     file_label = safe_label(pdf_path.stem)
 
+    # Filename-level skip
+    fn_ok, fn_reason = filename_says_floor_plan(pdf_path.name)
+    if not fn_ok:
+        rows.append({"project": project_label, "file": pdf_path.name, "page": 1,
+                     "status": "skipped_filename", "reason": fn_reason,
+                     "size_mb": round(size_mb, 1), "total_pages": total})
+        doc.close()
+        return rows
+
     for i in pages_to_try:
         try:
             pix = doc[i].get_pixmap(dpi=RENDER_DPI, alpha=False)
@@ -104,6 +115,20 @@ def process_pdf(pdf_path: Path, project_label: str, max_pages: int, exhibits_for
         except Exception as e:
             rows.append({"project": project_label, "file": pdf_path.name, "page": i + 1,
                          "status": f"render_failed: {e}"})
+            continue
+
+        # Visual sheet check
+        bmask, binfo = isolate_building(bgr)
+        bbox_pre = binfo.get("best_bbox")
+        score_pre = float(binfo.get("best_score", 0.0))
+        rooms = count_enclosed_rooms(bgr, bbox_pre)
+        if rooms < 4 or score_pre < 8.0:
+            rows.append({"project": project_label, "file": pdf_path.name, "page": i + 1,
+                         "status": "skipped_visual", "rooms": rooms,
+                         "iso_score": round(score_pre, 2),
+                         "size_mb": round(size_mb, 1), "total_pages": total})
+            del bgr, pix, buf
+            gc.collect()
             continue
 
         try:
