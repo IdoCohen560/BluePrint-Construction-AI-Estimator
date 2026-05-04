@@ -41,13 +41,49 @@ from blueprint_estimator.wall_graph_cv import (
 )
 
 
-# Geometric priors (px @ ~150–200 DPI).
-WALL_THICKNESS_MIN_PX = 2.0
-WALL_THICKNESS_MAX_PX = 22.0
+# Physical priors (real-world inches/feet — converted to pixels per image).
+WALL_THICKNESS_MIN_INCHES = 2.0   # interior partition lower bound
+WALL_THICKNESS_MAX_INCHES = 14.0  # exterior wall upper bound
+MIN_WALL_LEN_FEET = 1.5           # walls span at least ~18"
+JUNCTION_RADIUS_INCHES = 4.0      # endpoints meeting within ~4" = same junction
+
+# Pixel fallbacks (used when no scale info available; assume 150 DPI, 1/4"=1' plan).
 PARALLEL_ANGLE_TOL_DEG = 6.0
 OVERLAP_MIN_FRAC = 0.4
-MIN_LEN_PX = 25.0
-WALL_PROB_THRESHOLD = 0.55  # below this → not a wall
+WALL_PROB_THRESHOLD = 0.55
+
+
+def physical_thresholds(
+    feet_per_pixel: float | None,
+    image_shape: tuple[int, int] | None = None,
+) -> dict:
+    """Convert physical wall priors to per-image pixel thresholds.
+
+    feet_per_pixel comes from ScaleConfig.resolved_feet_per_pixel() — the
+    pipeline already computes it from PDF scale text or OCR'd title block.
+    Falls back to assuming 1/4"=1' at 150 DPI when missing.
+    """
+    if feet_per_pixel is None or feet_per_pixel <= 0:
+        # 1 drawing inch = 4 real feet; 150 px = 1 drawing inch → 4 ft / 150 px
+        feet_per_pixel = 4.0 / 150.0
+
+    px_per_inch = 1.0 / (feet_per_pixel * 12.0)
+    px_per_foot = px_per_inch * 12.0
+
+    th_min = max(2.0, WALL_THICKNESS_MIN_INCHES * px_per_inch)
+    th_max = max(th_min + 4.0, WALL_THICKNESS_MAX_INCHES * px_per_inch)
+    min_len = max(20.0, MIN_WALL_LEN_FEET * px_per_foot)
+    junc_r = max(3.0, JUNCTION_RADIUS_INCHES * px_per_inch)
+
+    return {
+        "wall_thickness_min_px": float(th_min),
+        "wall_thickness_max_px": float(th_max),
+        "min_len_px": float(min_len),
+        "junction_radius_px": float(junc_r),
+        "px_per_inch": float(px_per_inch),
+        "px_per_foot": float(px_per_foot),
+        "feet_per_pixel": float(feet_per_pixel),
+    }
 
 
 # ----------------------------- text masking ---------------------------------
@@ -222,10 +258,12 @@ def segment_features(
     others: list[Segment],
     text_keep: np.ndarray,
     parallel_partner_score: float,
+    junction_radius: float = 6.0,
+    min_other_len: float = 50.0,
 ) -> np.ndarray:
     profile = _perpendicular_profile(gray, s)
     peak, fwhm, contrast = _stroke_metrics(profile)
-    junc = _endpoint_junctions(s, others)
+    junc = _endpoint_junctions(s, others, radius=junction_radius, min_other_len=min_other_len)
     ink_a, ink_b = _neighborhood_ink(gray, s)
     text_frac = _in_text_mask(s, text_keep)
     length = _length(s)
@@ -276,6 +314,8 @@ def _parallel_partner_scores(
     text_keep: np.ndarray | None = None,
     min_partner_len: float = 50.0,
     gray: np.ndarray | None = None,
+    thickness_min: float = 2.0,
+    thickness_max: float = 22.0,
 ) -> tuple[list[float], list[int]]:
     """For each segment: best partner score in [0,1], and partner index (-1 if none).
 
@@ -298,13 +338,13 @@ def _parallel_partner_scores(
             if not _parallel(segs[i], segs[j]):
                 continue
             perp, overlap = _perp_distance_and_overlap(segs[i], segs[j])
-            if not (WALL_THICKNESS_MIN_PX <= perp <= WALL_THICKNESS_MAX_PX):
+            if not (thickness_min <= perp <= thickness_max):
                 continue
             if overlap < OVERLAP_MIN_FRAC:
                 continue
             if gray is not None and not _is_paper_between(gray, segs[i], segs[j]):
                 continue
-            band_center = (WALL_THICKNESS_MIN_PX + WALL_THICKNESS_MAX_PX) / 2
+            band_center = (thickness_min + thickness_max) / 2
             thickness_score = 1.0 - min(1.0, abs(perp - band_center) / band_center)
             score = 0.6 * overlap + 0.4 * thickness_score
             if score > scores[i]:
@@ -320,6 +360,7 @@ def _bootstrap_labels(
     segs: list[Segment],
     feats: np.ndarray,
     partner_scores: list[float],
+    min_len_px: float = 25.0,
 ) -> np.ndarray:
     """Return labels: 1=positive, 0=negative, -1=unlabeled."""
     n = len(segs)
@@ -346,7 +387,7 @@ def _bootstrap_labels(
         if feats[i, TEXT] >= 0.5:
             labels[i] = 0
             continue
-        if feats[i, LEN] < MIN_LEN_PX:
+        if feats[i, LEN] < min_len_px:
             labels[i] = 0
             continue
         if feats[i, JUNC] == 0 and feats[i, PEAK] < 40:
@@ -363,8 +404,22 @@ def detect_walls(
     image_bgr: np.ndarray,
     use_text_mask: bool = True,
     threshold: float = WALL_PROB_THRESHOLD,
+    scale_config=None,
+    feet_per_pixel: float | None = None,
 ) -> tuple[list[Segment], WallGraph, dict]:
-    """Hybrid geometric + learned image-recognition wall detector."""
+    """Hybrid geometric + learned image-recognition wall detector.
+
+    Pass `scale_config` (from blueprint_estimator.scale_qty.ScaleConfig) or
+    `feet_per_pixel` directly so thickness/length thresholds scale with the
+    drawing's real-world units instead of being hardcoded for ~150 DPI.
+    """
+    if feet_per_pixel is None and scale_config is not None:
+        try:
+            feet_per_pixel = float(scale_config.resolved_feet_per_pixel())
+        except Exception:
+            feet_per_pixel = None
+    th = physical_thresholds(feet_per_pixel, image_bgr.shape[:2])
+
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     text_keep = mask_text_regions(image_bgr) if use_text_mask else np.full(gray.shape, 255, np.uint8)
 
@@ -376,21 +431,29 @@ def detect_walls(
         img_for_hough = cv2.cvtColor(masked, cv2.COLOR_GRAY2BGR)
 
     raw = segments_from_image_hough(img_for_hough)
-    raw = [s for s in raw if _length(s) >= MIN_LEN_PX]
+    raw = [s for s in raw if _length(s) >= th["min_len_px"]]
 
     if not raw:
         return [], WallGraph(), {
             "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
             "text_masked": use_text_mask, "method": "no-segments",
+            "physical_thresholds": th,
         }
 
-    partner_scores, _ = _parallel_partner_scores(raw, text_keep=text_keep, gray=gray)
+    partner_scores, _ = _parallel_partner_scores(
+        raw, text_keep=text_keep, gray=gray,
+        min_partner_len=max(40.0, th["min_len_px"] * 0.8),
+        thickness_min=th["wall_thickness_min_px"],
+        thickness_max=th["wall_thickness_max_px"],
+    )
     feats = np.stack([
-        segment_features(s, gray, raw, text_keep, partner_scores[i])
+        segment_features(s, gray, raw, text_keep, partner_scores[i],
+                         junction_radius=th["junction_radius_px"],
+                         min_other_len=th["min_len_px"])
         for i, s in enumerate(raw)
     ])
 
-    labels = _bootstrap_labels(raw, feats, partner_scores)
+    labels = _bootstrap_labels(raw, feats, partner_scores, min_len_px=th["min_len_px"])
     pos_n = int((labels == 1).sum())
     neg_n = int((labels == 0).sum())
 
@@ -426,7 +489,7 @@ def detect_walls(
             + 0.15 * s_junc + 0.30 * s_par
         ) - 1.0 * s_text
         # hard gates: too short, mostly-in-text, OR isolated (no junction & no partner) → never a wall
-        probs[feats[:, LEN] < 40.0] = 0.0
+        probs[feats[:, LEN] < th["min_len_px"]] = 0.0
         probs[feats[:, TEXT] >= 0.3] = 0.0
         probs[(feats[:, JUNC] == 0) & (feats[:, PARP] < 0.4)] = 0.0
         probs = np.clip(probs, 0.0, 1.0)
@@ -448,5 +511,6 @@ def detect_walls(
         "threshold": threshold,
         "pos_pseudo_labels": pos_n,
         "neg_pseudo_labels": neg_n,
+        "physical_thresholds": th,
     }
     return walls, graph, info

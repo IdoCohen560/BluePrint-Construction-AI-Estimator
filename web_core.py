@@ -253,7 +253,9 @@ def run_single_file(
         else:
             inf = infer_scale_raster_from_image_bgr(ingest.image_bgr, dpi=int(dpi))
         from blueprint_estimator.wall_detector import detect_walls
-        segments, graph, wall_info = detect_walls(ingest.image_bgr, use_text_mask=True)
+        segments, graph, wall_info = detect_walls(
+            ingest.image_bgr, use_text_mask=True, scale_config=inf.scale_config
+        )
         linear_ft = total_linear_feet_segments(segments, inf.scale_config)
         overlay_bgr = draw_segments_overlay(ingest.image_bgr, segments)
         preview_png = png_bytes_bgr(ingest.image_bgr)
