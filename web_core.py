@@ -15,7 +15,14 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent
 
 SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".json", ".dxf"}
-DEFAULT_RASTER_DPI = 150
+import os
+# Lower default on resource-constrained hosts (Streamlit Cloud free = 1 GB RAM).
+# Override via BPE_DEFAULT_DPI env var.
+DEFAULT_RASTER_DPI = int(os.environ.get("BPE_DEFAULT_DPI", "120"))
+# Hard cap on PDF size to keep workers from OOMing. Override via BPE_MAX_PDF_MB.
+MAX_PDF_MB = int(os.environ.get("BPE_MAX_PDF_MB", "60"))
+# Only render up to this many pages from a single PDF. Override via BPE_MAX_PAGES.
+MAX_PDF_PAGES = int(os.environ.get("BPE_MAX_PAGES", "30"))
 # Line-only DOCX/PDF lists (no type column): all rows get this ``material_type``.
 DEFAULT_LINE_MATERIAL_TYPE = "misc"
 
@@ -229,6 +236,16 @@ def run_single_file(
     from blueprint_estimator.wall_graph_cv import image_to_wall_segments, total_segment_length
 
     suffix = Path(filename).suffix.lower()
+    size_mb = len(raw) / (1024 * 1024)
+    if size_mb > MAX_PDF_MB:
+        return {
+            "ok": False,
+            "filename": filename,
+            "error": (
+                f"File is {size_mb:.0f} MB. Hosted limit is {MAX_PDF_MB} MB to avoid OOM. "
+                "Split the construction set into individual sheets (one floor plan per file) and re-upload."
+            ),
+        }
     try:
         if suffix == ".json":
             ingest = vector_json_ingest_bytes(raw, filename)
@@ -253,9 +270,30 @@ def run_single_file(
         else:
             inf = infer_scale_raster_from_image_bgr(ingest.image_bgr, dpi=int(dpi))
         from blueprint_estimator.wall_detector import detect_walls
-        segments, graph, wall_info = detect_walls(
-            ingest.image_bgr, use_text_mask=True, scale_config=inf.scale_config
-        )
+        from blueprint_estimator.vision_llm_filter import classify_page, crop_to_bbox
+        decision = classify_page(ingest.image_bgr)
+        det_image = ingest.image_bgr
+        if decision.page_kind == "skip":
+            # Vision LLM says this isn't a plan/elevation worth running takeoff on.
+            wall_info = {
+                "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
+                "method": "skipped_by_vision_llm", "page_kind": decision.page_kind,
+                "stucco_linear_ft": 0.0, "stucco_segments": 0,
+            }
+            segments, graph = [], None
+            linear_ft = 0.0
+            stucco_linear_ft = 0.0
+            overlay_bgr = ingest.image_bgr
+            preview_png = png_bytes_bgr(ingest.image_bgr)
+            overlay_png = png_bytes_bgr(ingest.image_bgr)
+        else:
+            if decision.bbox != (0, 0, ingest.image_bgr.shape[1], ingest.image_bgr.shape[0]):
+                det_image = crop_to_bbox(ingest.image_bgr, decision.bbox)
+            segments, graph, wall_info = detect_walls(
+                det_image, use_text_mask=True, scale_config=inf.scale_config
+            )
+            wall_info["page_kind"] = decision.page_kind
+            wall_info["building_bbox"] = list(decision.bbox)
         linear_ft = total_linear_feet_segments(segments, inf.scale_config)
         # If stucco classifier is loaded, also compute stucco-only linear feet
         stucco_segments = [s for s in segments if s.meta.get("stucco_probability", 0.0) >= 0.5]

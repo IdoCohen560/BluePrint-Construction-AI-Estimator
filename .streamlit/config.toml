@@ -4,7 +4,7 @@
 [server]
 # Local dev binds 127.0.0.1; on Streamlit Cloud the platform sets address/port itself.
 headless = true
-maxUploadSize = 1024
+maxUploadSize = 80
 enableCORS = false
 enableXsrfProtection = true
 
