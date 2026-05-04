@@ -60,6 +60,73 @@ def png_bytes_bgr(bgr: np.ndarray) -> bytes:
     return buf.tobytes()
 
 
+def high_res_overlay_png(image_bgr: np.ndarray, segments, target_long_side: int = 1920,
+                         color=(0, 200, 0), thickness: int = 3) -> bytes:
+    """Render the wall overlay at >=1080p (default 1920 long side, ~2 MP).
+
+    Up-samples the source image so that fine walls remain sharp on zoom.
+    """
+    if image_bgr is None or image_bgr.size == 0:
+        return b""
+    h, w = image_bgr.shape[:2]
+    long = max(h, w)
+    scale = max(1.0, target_long_side / float(long))
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    big = cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+    for s in segments:
+        cv2.line(
+            big,
+            (int(s.x1 * scale), int(s.y1 * scale)),
+            (int(s.x2 * scale), int(s.y2 * scale)),
+            color,
+            max(2, int(thickness * (scale / 2))),
+            lineType=cv2.LINE_AA,
+        )
+    ok, buf = cv2.imencode(".png", big, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+    if not ok:
+        raise RuntimeError("hi-res PNG encode failed")
+    return buf.tobytes()
+
+
+def overlay_pdf_bytes(image_bgr: np.ndarray, segments, target_long_side: int = 2400) -> bytes:
+    """Wrap the high-res overlay in a single-page PDF that opens in Acrobat,
+    Preview, browsers, or any PDF viewer. Embeds JPEG for compact size.
+    """
+    if image_bgr is None or image_bgr.size == 0:
+        return b""
+    h, w = image_bgr.shape[:2]
+    long = max(h, w)
+    scale = max(1.0, target_long_side / float(long))
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+    big = cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+    for s in segments:
+        cv2.line(
+            big,
+            (int(s.x1 * scale), int(s.y1 * scale)),
+            (int(s.x2 * scale), int(s.y2 * scale)),
+            (0, 200, 0),
+            max(2, int(3 * (scale / 2))),
+            lineType=cv2.LINE_AA,
+        )
+    ok, jpg = cv2.imencode(".jpg", big, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise RuntimeError("JPEG encode failed")
+    jpg = jpg.tobytes()
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as e:
+        raise RuntimeError("PyMuPDF required for PDF export") from e
+    pdf = fitz.open()
+    # 72 dpi PDF user units == 1 px per unit; page size = pixel size keeps zoom crisp
+    page = pdf.new_page(width=new_w, height=new_h)
+    page.insert_image(fitz.Rect(0, 0, new_w, new_h), stream=jpg)
+    out = pdf.tobytes()
+    pdf.close()
+    return out
+
+
 def expand_zip_archive(zip_name: str, data: bytes) -> list[tuple[str, bytes]]:
     out: list[tuple[str, bytes]] = []
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -303,6 +370,11 @@ def run_single_file(
         overlay_bgr = draw_segments_overlay(ingest.image_bgr, segments)
         preview_png = png_bytes_bgr(ingest.image_bgr)
         overlay_png = png_bytes_bgr(overlay_bgr)
+        hires_overlay_png = high_res_overlay_png(ingest.image_bgr, segments, target_long_side=1920)
+        try:
+            hires_overlay_pdf = overlay_pdf_bytes(ingest.image_bgr, segments, target_long_side=2400)
+        except Exception:
+            hires_overlay_pdf = b""
     else:
         if suffix == ".dxf":
             inf = infer_scale_vector_dxf_bytes(raw, filename)
@@ -311,6 +383,8 @@ def run_single_file(
         vf = inf.vector_feet_per_unit or (1.0 / 12.0)
         linear_ft = total_segment_length(segments) * float(vf)
         wall_info = {"raw_segments": len(segments), "wall_segments": len(segments), "mean_confidence": 1.0, "text_masked": False}
+        hires_overlay_png = b""
+        hires_overlay_pdf = b""
 
     wall_area = wall_area_sheetboard_ft2(linear_ft, float(ceiling_ft))
     smry = scale_summary(inf, int(dpi)) if inf else ""
@@ -362,6 +436,8 @@ def run_single_file(
         "wall_info": wall_info,
         "stucco_linear_ft": wall_info.get("stucco_linear_ft", 0.0),
         "stucco_wall_yards_sq": (wall_info.get("stucco_linear_ft", 0.0) * float(ceiling_ft) / 9.0),
+        "hires_overlay_png": hires_overlay_png,
+        "hires_overlay_pdf": hires_overlay_pdf,
     }
 
 

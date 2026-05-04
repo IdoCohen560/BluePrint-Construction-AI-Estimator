@@ -143,6 +143,9 @@ def main() -> None:
         )
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
+    import base64
+    import streamlit.components.v1 as components
+
     for fr in res["files"]:
         if not fr.get("ok"):
             continue
@@ -152,7 +155,90 @@ def main() -> None:
             if fr.get("preview_png"):
                 c1.image(io.BytesIO(fr["preview_png"]), caption="Input", use_container_width=True)
             if fr.get("overlay_png"):
-                c2.image(io.BytesIO(fr["overlay_png"]), caption="Walls detected", use_container_width=True)
+                c2.image(io.BytesIO(fr["overlay_png"]), caption="Walls detected (preview)", use_container_width=True)
+
+            # High-res overlay + downloads + zoom viewer
+            if fr.get("source_image_bytes") and fr.get("segments_payload") is not None:
+                # Lazy: regenerate hi-res from the cached source image
+                pass
+
+            hires_png = fr.get("hires_overlay_png")
+            hires_pdf = fr.get("hires_overlay_pdf")
+            if hires_png:
+                st.markdown("**Zoomable wall overlay (drag / pinch / scroll)**")
+                b64 = base64.b64encode(hires_png).decode("ascii")
+                # OpenSeadragon-free panzoom via inline HTML/JS — no extra deps
+                components.html(
+                    f"""
+                    <div id='wrap' style='position:relative;width:100%;height:600px;border:1px solid #ddd;
+                        overflow:hidden;background:#fafafa;cursor:grab;touch-action:none;'>
+                      <img id='img' src='data:image/png;base64,{b64}' draggable='false'
+                           style='position:absolute;left:0;top:0;transform-origin:0 0;user-select:none;
+                                  max-width:none;max-height:none;'/>
+                    </div>
+                    <div style='font-size:12px;color:#666;margin-top:4px;'>
+                      Scroll = zoom · Drag = pan · Double-click = reset
+                    </div>
+                    <script>
+                    (function() {{
+                      const wrap = document.getElementById('wrap');
+                      const img = document.getElementById('img');
+                      let scale = 1, ox = 0, oy = 0, dragging = false, sx = 0, sy = 0;
+                      function fit() {{
+                        const r = wrap.getBoundingClientRect();
+                        scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+                        ox = (r.width - img.naturalWidth * scale) / 2;
+                        oy = (r.height - img.naturalHeight * scale) / 2;
+                        apply();
+                      }}
+                      function apply() {{
+                        img.style.transform = `translate(${{ox}}px,${{oy}}px) scale(${{scale}})`;
+                      }}
+                      img.onload = fit;
+                      if (img.complete) fit();
+                      wrap.addEventListener('wheel', e => {{
+                        e.preventDefault();
+                        const r = wrap.getBoundingClientRect();
+                        const cx = e.clientX - r.left, cy = e.clientY - r.top;
+                        const f = e.deltaY < 0 ? 1.15 : 1/1.15;
+                        const ns = Math.max(0.1, Math.min(20, scale * f));
+                        ox = cx - (cx - ox) * (ns / scale);
+                        oy = cy - (cy - oy) * (ns / scale);
+                        scale = ns; apply();
+                      }}, {{ passive: false }});
+                      wrap.addEventListener('mousedown', e => {{
+                        dragging = true; sx = e.clientX - ox; sy = e.clientY - oy;
+                        wrap.style.cursor = 'grabbing';
+                      }});
+                      window.addEventListener('mousemove', e => {{
+                        if (!dragging) return;
+                        ox = e.clientX - sx; oy = e.clientY - sy; apply();
+                      }});
+                      window.addEventListener('mouseup', () => {{
+                        dragging = false; wrap.style.cursor = 'grab';
+                      }});
+                      wrap.addEventListener('dblclick', fit);
+                    }})();
+                    </script>
+                    """,
+                    height=650,
+                )
+
+                d1, d2 = st.columns(2)
+                d1.download_button(
+                    "⬇ Download high-res PNG (1920px)",
+                    data=hires_png,
+                    file_name=f"{fr['filename'].rsplit('.',1)[0]}_walls.png",
+                    mime="image/png",
+                )
+                if hires_pdf:
+                    d2.download_button(
+                        "⬇ Download PDF (Acrobat)",
+                        data=hires_pdf,
+                        file_name=f"{fr['filename'].rsplit('.',1)[0]}_walls.pdf",
+                        mime="application/pdf",
+                    )
+
             if fr.get("ranked_html"):
                 st.markdown("**Suggested materials (this file, one per trade)**", unsafe_allow_html=True)
                 st.markdown(fr["ranked_html"], unsafe_allow_html=True)

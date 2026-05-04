@@ -514,6 +514,23 @@ def detect_walls(
     raw = segments_from_image_hough(img_for_hough)
     raw = [s for s in raw if _length(s) >= th["min_len_px"]]
 
+    # Building isolator: keep only segments whose midpoint sits in the
+    # floor-plan-likeness winning component. Schedules / title blocks /
+    # general-notes blocks are filtered out before any classifier runs.
+    from blueprint_estimator.building_isolator import isolate_building, reject_text_underlines
+    building_mask, building_info = isolate_building(image_bgr)
+    if building_mask.any():
+        Hh, Ww = building_mask.shape
+        raw = [
+            s for s in raw
+            if building_mask[
+                int(np.clip((s.y1 + s.y2) / 2, 0, Hh - 1)),
+                int(np.clip((s.x1 + s.x2) / 2, 0, Ww - 1)),
+            ] > 0
+        ]
+    # Drop short-horizontal text underlines that survive the inside-building test
+    raw = reject_text_underlines(raw, text_keep)
+
     if not raw:
         return [], WallGraph(), {
             "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
@@ -627,5 +644,6 @@ def detect_walls(
         "pos_pseudo_labels": pos_n,
         "neg_pseudo_labels": neg_n,
         "physical_thresholds": th,
+        "building_isolator": building_info,
     }
     return walls, graph, info
