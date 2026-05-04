@@ -338,6 +338,49 @@ def run_single_file(
             inf = infer_scale_raster_from_image_bgr(ingest.image_bgr, dpi=int(dpi))
         from blueprint_estimator.wall_detector import detect_walls
         from blueprint_estimator.vision_llm_filter import classify_page, crop_to_bbox
+        from blueprint_estimator.sheet_classifier import should_run_takeoff
+        from blueprint_estimator.building_isolator import isolate_building
+
+        # Pre-flight: filename + visual room-count check. Skip non-floor-plan
+        # sheets (schedules, elevations, accessibility details, etc.) so we
+        # never produce wall counts on them.
+        _bmask, _binfo = isolate_building(ingest.image_bgr)
+        _bbox = _binfo.get("best_bbox")
+        _bscore = float(_binfo.get("best_score", 0.0))
+        _take_ok, _take_meta = should_run_takeoff(filename, ingest.image_bgr,
+                                                    bbox=_bbox, score=_bscore)
+        if not _take_ok:
+            wall_info = {
+                "raw_segments": 0, "wall_segments": 0, "mean_confidence": 0.0,
+                "method": "skipped_non_floor_plan", "stucco_linear_ft": 0.0,
+                "stucco_segments": 0, "sheet_classifier": _take_meta,
+            }
+            segments, graph = [], None
+            linear_ft = 0.0
+            stucco_linear_ft = 0.0
+            preview_png = png_bytes_bgr(ingest.image_bgr)
+            overlay_png = png_bytes_bgr(ingest.image_bgr)
+            hires_overlay_png = b""
+            hires_overlay_pdf = b""
+            wall_info["building_isolator"] = _binfo
+            return {
+                "ok": True, "error": None, "filename": filename,
+                "linear_ft": 0.0, "wall_area": 0.0,
+                "graph_nodes": 0, "graph_edges": 0,
+                "ranked_html": "", "top_material_id": None,
+                "top_p_match": None, "top_rough_usd": None,
+                "preview_png": preview_png, "overlay_png": overlay_png,
+                "ingest_source": ingest.source, "segment_count": 0,
+                "scale_method": "", "scale_confidence": 0.0,
+                "scale_notes": f"Skipped: {_take_meta.get('filename_reason','')} | "
+                               f"rooms={_take_meta.get('rooms',0)} | "
+                               f"score={_take_meta.get('iso_score',0):.1f}",
+                "scale_summary": "Skipped — not a floor plan",
+                "wall_info": wall_info, "stucco_linear_ft": 0.0,
+                "stucco_wall_yards_sq": 0.0,
+                "hires_overlay_png": b"", "hires_overlay_pdf": b"",
+            }
+
         decision = classify_page(ingest.image_bgr)
         det_image = ingest.image_bgr
         if decision.page_kind == "skip":
